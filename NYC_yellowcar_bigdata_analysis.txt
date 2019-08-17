@@ -1,0 +1,484 @@
+# Big Data Analytics Group Project
+# NYC Parking Tickets: An Exploratory Analysis
+# Submitted By:
+## Narendra
+## Priyanka Srivastava
+## Rajasekar Gopalakrishnan
+## Venkatesh Singamsetty
+# Submission Date: 10-March-2019
+
+
+#1. Load the necessary libraries, SparkR & Initialise the sparkR session
+
+library(ggplot2)
+library(SparkR)
+
+spark_path <- '/usr/local/spark'
+if (nchar(Sys.getenv("SPARK_HOME")) < 1) {
+  Sys.setenv(SPARK_HOME = spark_path)
+}
+
+library(SparkR, lib.loc = c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib")))
+sparkR.session(master = "yarn", sparkConfig = list(spark.driver.memory = "1g"))
+
+# Before executing any hive-sql query from RStudio, adding the pre-requisite jar file.
+sql("ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar")
+
+
+#2. Read the data file
+
+data_nyc_parking <- SparkR::read.df("hdfs:///common_folder/nyc_parking/Parking_Violations_Issued_-_Fiscal_Year_2017.csv",
+                                    "CSV", header="true", inferSchema = "true")
+
+# Let's have a look at the columns and structure of the data frame.
+head(data_nyc_parking)
+str(data_nyc_parking)
+nrow(data_nyc_parking) # 10803028 rows
+ncol(data_nyc_parking) # 10 columns
+
+df <- collect(describe(data_nyc_parking))
+View(df)
+
+
+#3. Initial Observations On Data
+
+# Column Issue Date Has Dates From Years != 2017
+# Violation Time Has Time In 12:00 Hours Format With "A" or "P"
+# The DataSet Has 10803028 Rows And 10 Columns
+# The Issue Date Is in POSIXct Format
+# There Are Spaces In The Column Names And They Are Addressed As Below
+
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Summons Number")]      <- "Summons_Number"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Plate ID")]            <- "Plate_ID"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Registration State")]  <- "Registration_State"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Issue Date")]          <- "Issue_Date"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Violation Code")]      <- "Violation_Code"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Vehicle Body Type")]   <- "Vehicle_Body_Type"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Vehicle Make")]        <- "Vehicle_Make"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Violation Precinct")]  <- "Violation_Precinct"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Issuer Precinct")]     <- "Issuer_Precinct"
+colnames(data_nyc_parking)[which(names(data_nyc_parking) == "Violation Time")]      <- "Violation_Time"
+
+#4. Exploratory Data Analysis
+
+# Dropping Duplicates On Summons Number Column
+data_nyc_parking <- dropDuplicates(data_nyc_parking, "Summons_Number")
+nrow(data_nyc_parking) # 10803028 Rows # No Duplicate Records
+
+
+# Introducing A New Column(s) For Issue Year And Issue Month
+
+data_nyc_parking$Issue_Year  <- year(data_nyc_parking$Issue_Date)  #Useful To Select Records By Year (2017)
+data_nyc_parking$Issue_Month <- month(data_nyc_parking$Issue_Date) #Useful To Calculate Seasonality Later
+head(data_nyc_parking)
+
+# Cleaning The Violation Time Column (It Has Only "A" or "P" As The Suffix)
+
+data_nyc_parking$Violation_Time <- regexp_replace(data_nyc_parking$Violation_Time, "P", "PM")
+data_nyc_parking$Violation_Time <- regexp_replace(data_nyc_parking$Violation_Time, "A", "AM")
+
+# Separating The Violation Time Into Hours and Minutes And AM/PM
+data_nyc_parking$Violation_Hour     <- substr(data_nyc_parking$Violation_Time, 1, 2)
+data_nyc_parking$Violation_Minute   <- substr(data_nyc_parking$Violation_Time, 3, 4)
+data_nyc_parking$Violation_Meridian <- substr(data_nyc_parking$Violation_Time, 5, 6)
+
+data_nyc_parking$Violation_Hour     <- regexp_replace(data_nyc_parking$Violation_Hour, 
+                                                      "00", "12")
+head(data_nyc_parking)
+
+#4.1 Examine the data
+#4.1.1 Find the total number of tickets for the year.
+
+# Create Subset Of Orginal DataSet With Issue Year = 2017
+createOrReplaceTempView(data_nyc_parking, "view_nyc_parking")
+
+data_nyc_parking_subset <- SparkR::sql("SELECT * FROM view_nyc_parking 
+                                       WHERE Issue_Year = '2017'")
+nrow(data_nyc_parking_subset) 
+# count of tickets for 2017 = 5431918
+head(data_nyc_parking_subset) 
+# verify data structure remains same
+
+
+#4.1.2 Find out the number of unique states from where the cars that 
+###### got parking tickets came from
+
+createOrReplaceTempView(data_nyc_parking_subset, "view_nyc_parking_subset")
+count_state <- SparkR::sql("SELECT Registration_State, COUNT(*) as count_by_state
+                           FROM view_nyc_parking_subset 
+                           GROUP BY Registration_State
+                           ORDER BY count_by_state desc")
+
+nrow(count_state)                    # 65 Unique Entries Of Registration_State
+head(count_state, nrow(count_state)) # Registration_State = 99 Has 16055 entries
+# Max of Registration_State = NY With 4273951
+
+# Replace Registration_State = "99" With "NY"
+data_nyc_parking_subset$Registration_State <- regexp_replace(data_nyc_parking_subset$Registration_State, "99", "NY")
+
+createOrReplaceTempView(data_nyc_parking_subset, "view_nyc_parking_subset_2")
+count_state_updated <- SparkR::sql("SELECT Registration_State, COUNT(*) as count_by_state
+                                   FROM view_nyc_parking_subset_2 
+                                   GROUP BY Registration_State
+                                   ORDER BY count_by_state desc")
+
+nrow(count_state_updated)     # 64 Unique Entries Of Registration_State
+head(count_state_updated, nrow(count_state_updated)) 
+# Registration_State = 99 Is Missing
+# Max of Registration_State = NY With 4290006
+
+#4.2 Aggregation tasks
+#4.2.1 How often does each violation code occur? 
+###### Display the frequency of the top five violation codes.
+
+count_violation_code  <- SparkR::sql("SELECT Violation_Code, COUNT(*) as number_violation_code
+                                     FROM view_nyc_parking_subset_2 
+                                     GROUP BY Violation_Code
+                                     ORDER BY number_violation_code desc")
+head(count_violation_code, 5) 
+
+# The Top 5 Violation Codes Are
+#N      Violation_Code     number_violation_code                                          
+#1             21                768087
+#2             36                662765
+#3             38                542079
+#4             14                476664
+#5             20                319646
+
+plot_violation_code <- data.frame(head(count_violation_code,5))
+
+ggplot(plot_violation_code, aes(x = as.factor(Violation_Code), 
+                                              y = number_violation_code)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  xlab("Violation Code")      +
+  ylab("Count")               + 
+  ggtitle("The Top 5 Violation Codes Plotted By Count") + 
+  geom_text(aes(label = number_violation_code), vjust = -0.5)
+
+
+# 4.2.2 How often does each 'vehicle body type' get a parking ticket? How about the 'vehicle make'? (Hint: find the top 5 for both)
+# 4.2.2.a Top 5 vehicle body types based on number of violation code
+vehicle_body_type_count <- SparkR::sql("SELECT Vehicle_Body_Type, COUNT(*) as number_violation_code
+                                       FROM view_nyc_parking_subset_2 
+                                       GROUP BY Vehicle_Body_Type
+                                       ORDER BY number_violation_code desc")
+
+head(vehicle_body_type_count, 5)
+
+#   Vehicle_Body_Type   number_violation_code                                    
+#1              SUBN                  1883954
+#2              4DSD                  1547312
+#3               VAN                   724029
+#4              DELV                   358984
+#5               SDN                   194197
+
+# ggplot for top 5 car body-
+plot_top5_body_type <- data.frame(head(vehicle_body_type_count,5))
+
+ggplot(plot_top5_body_type, aes(x = reorder(as.factor(Vehicle_Body_Type), -number_violation_code ), 
+                                y = number_violation_code)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  xlab("Vehicle Body Type") +
+  ylab("Count") + 
+  ggtitle("Top 5 car body which was involved in violations")
+
+
+# 4.2.2.b Top 5 vehicle make (brand) based on number of violation code
+vehicle_make_count <- SparkR::sql("SELECT Vehicle_Make, COUNT(*) as number_violation_code
+                                  FROM view_nyc_parking_subset_2 
+                                  GROUP BY Vehicle_Make
+                                  ORDER BY number_violation_code desc")
+
+head(vehicle_make_count, 5)
+
+#  Vehicle_Make number_violation_code                                             
+#1         FORD               636844
+#2        TOYOT               605291
+#3        HONDA               538884
+#4        NISSA               462017
+#5        CHEVR               356032
+
+# ggplot for top 5 car company - 
+plot_top5_car_company <- data.frame(head(vehicle_make_count,5))
+
+ggplot(plot_top5_car_company, aes(x = reorder(as.factor(Vehicle_Make), -number_violation_code ), 
+                                  y = number_violation_code)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  xlab("Vehicle Make") +
+  ylab("Count") + 
+  ggtitle("Top 5 make body which was involved in violations")
+
+
+# 4.2.3 A precinct is a police station that has a certain zone of the city under its command. 
+#       Find the (5 highest) frequency of tickets for each of the following:
+#4.2.3.1 'Violation Precinct' (this is the precinct of the zone where the violation occurred). Using this, can you make any insights for parking violations in any specific areas of the city?
+zonal_violation_count <- SparkR::sql("SELECT Violation_Precinct, COUNT(*) as number_violation_code
+                                     FROM view_nyc_parking_subset_2 
+                                     GROUP BY Violation_Precinct
+                                     ORDER BY number_violation_code desc")
+head(zonal_violation_count, 6)
+
+#Top 5 zone (precinct) in terms of violations
+#   Violation_Precinct number_violation_code                                      
+#1                  0                925596  ## pls dont consider this, as Precinct number is '0'. these are erroneous entries
+### Below are top 5 zones
+#2                 19                274445
+#3                 14                203553
+#4                  1                174702
+#5                 18                169131
+#6                114                147444
+
+
+#4.2.3.1  Issuer Precinct' (this is the precinct that issued the ticket)
+#         Here you would have noticed that the dataframe has 'Violating Precinct' or 'Issuing Precinct' as '0'. 
+#         These are the erroneous entries. Hence, provide the record for five correct precincts. (Hint: Print top six entries after sorting)
+zonal_Issuer_count <- SparkR::sql("SELECT Issuer_Precinct, COUNT(*) as number_violation_code
+                                  FROM view_nyc_parking_subset_2 
+                                  WHERE Issuer_Precinct not in ('0')
+                                  GROUP BY Issuer_Precinct
+                                  ORDER BY number_violation_code desc")
+head(zonal_Issuer_count, 5)
+#Issuer_Precinct number_violation_code                                         
+#1              19                266961
+#2              14                200495
+#3               1                168740
+#4              18                162994
+#5             114                144054
+
+# We are not removing entries which having precinct '0', as it is not mentioned explicitely to remove them.
+# Though we are creating the df below, but will not use it for any further analysis.
+data_nyc_parking_subset_1 <- SparkR::sql("SELECT * FROM view_nyc_parking_subset_2 
+                                  WHERE Issuer_Precinct != '0' AND Violation_Precinct != '0'")
+
+nrow(data_nyc_parking_subset_1)
+
+# ggplot for top three issuer precinct-
+plot_top3_issuer_zone <- data.frame(head(zonal_Issuer_count,3))
+
+ggplot(plot_top3_issuer_zone, aes(x = reorder(as.factor(Issuer_Precinct), -number_violation_code ), 
+                                  y = number_violation_code)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  xlab("Issuer Precinct") +
+  ylab("Count") + 
+  ggtitle("Top 3 violation code in issuer precinct")
+
+
+# 4.2.4 Find the violation code frequency across three precincts which have issued the most number of tickets - do these precinct zones have an 
+#       exceptionally high frequency of certain violation codes? Are these codes common across precincts?
+# As per previous queries the most number of issuer precincts are 19, 14 and 1. Not including 0 as they are erroneous entries.
+
+precinct_violation_count <- SparkR::sql("SELECT Issuer_Precinct, Violation_Code, COUNT(*) as number_violation_code
+                                        FROM view_nyc_parking_subset_2 
+                                        WHERE Issuer_Precinct in ('19', '14','1')
+                                        GROUP BY Violation_Code,Issuer_Precinct
+                                        ORDER BY number_violation_code desc")
+
+head(precinct_violation_count)
+#   Issuer_Precinct Violation_Code number_violation_code                          
+#1              19             46                 48445
+#2              14             14                 45036
+#3               1             14                 38354
+#4              19             38                 36386
+#5              19             37                 36056
+#6              14             69                 30464
+
+# It looks like the most number of violation code is 14, followed by 46, 38 and 37. 
+
+
+# 4.2.5 You’d want to find out the properties of parking violations across different times of the day:
+# 4.2.5.1   Find a way to deal with missing values, if any.
+
+# Let's check for missing values for each of column using isNull
+# Column 1 - Summons_Number
+missing_values_Summons_Number <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Summons_Number))
+
+head(missing_values_Summons_Number) # No missing value found for this column
+
+# Column 2
+missing_values_Plate_ID <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Plate_ID))
+
+head(missing_values_Plate_ID)   # No missing value found for this column
+
+
+# Column 3
+missing_values_Registration_State <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Registration_State))
+
+head(missing_values_Registration_State)   # No missing value found for this column
+
+
+# Column 4
+missing_values_Issue_Date <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Issue_Date))
+
+head(missing_values_Issue_Date)   # No missing value found for this column
+
+
+# Column 5 : Violation_Code
+missing_values_Violation_Code <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Violation_Code))
+
+head(missing_values_Violation_Code)     # No missing value found for this column
+
+# Column 6 : Vehicle_Body_Type 
+missing_values_Vehicle_Body_Type <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Vehicle_Body_Type))
+
+head(missing_values_Vehicle_Body_Type)  # No missing value found for this column
+
+# Column 7 : Issuer_Precinct 
+missing_values_Issuer_Precinct <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Issuer_Precinct))
+
+head(missing_values_Issuer_Precinct)    # No missing value found for this column
+
+# Column 8 : Vehicle_Make 
+missing_values_Vehicle_Make <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Vehicle_Make))
+
+head(missing_values_Vehicle_Make)   # No missing value found for this column
+
+# Column 9 : Violation_Precinct 
+missing_values_Violation_Precinct <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Violation_Precinct))
+
+head(missing_values_Violation_Precinct)   # No missing value found for this column
+
+# Column 10 : Violation_Time 
+missing_values_Violation_Time <- filter(data_nyc_parking_subset, isNull(data_nyc_parking_subset$Violation_Time))
+
+head(missing_values_Violation_Time)   # No missing value found for this column
+
+## No missing value found for any of the column.
+
+library(dplyr)
+library(dplyr, lib.loc = c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib")))
+
+# 4.2.5.2 - The Violation Time field is specified in a strange format. Find a way to make this into a time attribute that you can use to divide into groups.
+
+## It's been already done above, we have converted the violation time to violation hour to convert the time into groups.
+### Adding Violation_Hour_24f column to get 24 hour format
+str(data_nyc_parking_subset)
+data_nyc_parking_subset$Violation_Hour <- cast(data_nyc_parking_subset$Violation_Hour, "integer")
+data_nyc_parking_subset$Violation_Hour_24f <- ifelse(data_nyc_parking_subset$Violation_Meridian == "PM", data_nyc_parking_subset$Violation_Hour + 12, data_nyc_parking_subset$Violation_Hour)
+head(data_nyc_parking_subset,25)
+
+createOrReplaceTempView(data_nyc_parking_subset, "view_nyc_parking_subset_3")
+
+# 4.2.5.3 - Divide 24 hours into six equal discrete bins of time. The intervals you choose are at your discretion. For each of these groups, 
+#           find the three most commonly occurring violations.
+
+violation_hour_bins <- SparkR::sql("SELECT Violation_Hour,
+                                   Violation_Code,
+                                   CASE 
+                                   WHEN Violation_Hour_24f > 23 OR Violation_Hour_24f < 3
+                                   THEN 'Mid_Night'
+                                   WHEN Violation_Hour_24f BETWEEN 3 AND 7
+                                   THEN 'Early_Morning'
+                                   WHEN Violation_Hour_24f BETWEEN 7 AND 11
+                                   THEN 'Before_Noon'
+                                   WHEN Violation_Hour_24f BETWEEN 11 AND 15
+                                   THEN 'After_Noon' 
+                                   WHEN Violation_Hour_24f BETWEEN 15 AND 19
+                                   THEN 'Evening' 
+                                   WHEN Violation_Hour_24f BETWEEN 20 AND 23
+                                   THEN 'Night' 
+                                   END AS Violation_Hour_Bin
+                                   FROM view_nyc_parking_subset_3")
+
+
+head(violation_hour_bins,25)
+
+# 4.2.5.3 - Now, try another direction. For the three most commonly occurring violation codes, 
+###   find the most common time of the day (in terms of the bins from the previous part)
+overall_counts <- summarize(groupBy(violation_hour_bins, violation_hour_bins$Violation_Hour_Bin),
+                            count = n(violation_hour_bins$Violation_Hour_Bin))
+head(arrange(overall_counts, desc(overall_counts$count)))
+# 1        Before_Noon 2163568
+# 2         After_Noon 1375522
+# 3            Evening  637540
+# 4          Mid_Night  596573
+# 5      Early_Morning  482339
+# 6              Night  176360
+
+# Result: More violations are occuring before_noon time, i.e from 7AM to 11AM.
+
+
+# 4.2.6.1 - Let’s try and find some seasonality in this data
+####  First, divide the year into some number of seasons, and find frequencies of tickets for each season.
+Violation_season_df <- SparkR::sql("select Violation_Code, Issue_Month,
+                                   CASE 
+                                   WHEN Issue_Month in (9,10,11)
+                                   Then 'Fall'
+                                   WHEN Issue_Month in (12,1,2)
+                                   Then 'Winter'
+                                   WHEN Issue_Month in (3,4,5)
+                                   Then 'Spring'
+                                   WHEN Issue_Month in (6,7,8)
+                                   Then 'Summer'
+                                   END as Season
+                                   FROM view_nyc_parking_subset_3")
+
+
+head(Violation_season_df, 10)
+
+overall_Season_counts <- summarize(groupBy(Violation_season_df, Violation_season_df$Season),
+                                   count = n(Violation_season_df$Season))
+head(arrange(overall_Season_counts, desc(overall_Season_counts$count)))
+
+# Result:
+#   Season   count                                                                
+# 1 Spring 2873383
+# 2 Winter 1704690
+# 3 Summer  852866
+# 4   Fall     979
+
+## 4.2.6.2 -- Then, find the three most common violations for each of these seasons.
+overall_Season_counts2 <- summarize(groupBy(Violation_season_df, Violation_season_df$Season,Violation_season_df$Violation_Code),
+                                    count = n(Violation_season_df$Season))
+
+
+head(arrange(filter(overall_Season_counts2,overall_Season_counts2$Season == 'Fall'), desc(overall_Season_counts2$count)),3)
+#    Season Violation_Code count                                                   
+# 1   Fall             46   231
+# 2   Fall             21   128
+# 3   Fall             40   116
+
+head(arrange(filter(overall_Season_counts2,overall_Season_counts2$Season == 'Spring'), desc(overall_Season_counts2$count)),3)
+#   Season Violation_Code  count                                                  
+# 1 Spring             21 402424
+# 2 Spring             36 344834
+# 3 Spring             38 271167
+
+head(arrange(filter(overall_Season_counts2,overall_Season_counts2$Season == 'Winter'), desc(overall_Season_counts2$count)),3)
+#   Season Violation_Code  count                                                  
+# 1 Winter             21 238183
+# 2 Winter             36 221268
+# 3 Winter             38 187386
+head(arrange(filter(overall_Season_counts2,overall_Season_counts2$Season == 'Summer'), desc(overall_Season_counts2$count)),3)
+#   Season Violation_Code  count                                                  
+# 1 Summer             21 127352
+# 2 Summer             36  96663
+# 3 Summer             38  83518
+
+
+# 4.2.7 -The fines collected from all the parking violation constitute a revenue source for the NYC police department. Let’s take an example of estimating that for the three most commonly occurring codes.
+# 4.2.7.1 --Find total occurrences of the three most common violation codes
+sum(head(count_violation_code, 3)$number_violation_code) 
+# Result is 1972931. (violation codes are 21,36,38)
+
+# 4.2.7.2 --It lists the fines associated with different violation codes. They’re divided into two categories, one for the highest-density locations of the city, the other for the rest of the city. For simplicity, take an average of the two.
+# Violation_code   average_fine (from the given source link calculated manually)
+#   21                55
+#   36                50
+#   38                50
+
+# 4.2.7.3 --Using this information, find the total amount collected for the three violation codes with maximum tickets. State the code which has the highest total collection
+violation_code_amount <- head(count_violation_code, 3)
+head(violation_code_amount)
+str(violation_code_amount)
+violation_code_amount$collection_per_code <- case_when(violation_code_amount$Violation_Code == 21 ~ (violation_code_amount$number_violation_code*55),
+                                                       violation_code_amount$Violation_Code == 36 ~ (violation_code_amount$number_violation_code*50),
+                                                       violation_code_amount$Violation_Code == 38 ~ (violation_code_amount$number_violation_code*50))
+violation_code_amount
+#     Violation_Code   number_violation_code   collection_per_code
+# 1             21                768087            42244785   
+# 2             36                662765            33138250
+# 3             38                542079            27103950
+
+sum(violation_code_amount$collection_per_code)  #102486985
+##   total amount collected for the three violation codes is 102486985 
+##  The violation code 21 has highest collection amount among above three.
